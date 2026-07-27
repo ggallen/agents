@@ -319,8 +319,11 @@ fi
 # NOTE: fullsend does not expose distinct exit codes for transient vs.
 # permanent failures (e.g. invalid token, malformed result file). As a
 # deliberate trade-off, all non-zero/non-10 codes are retried — a permanent
-# failure wastes at most two retry attempts (~20s) before falling through to
-# the degraded-mode fallback.
+# failure wastes at most two retry attempts before falling through to the
+# degraded-mode fallback. (Wall-clock cost depends on failure class: 422s
+# and auth errors return immediately, but rate-limit-class failures may
+# trigger fullsend's own internal retry/backoff before returning control
+# here.)
 # If all retries are exhausted, attempt degraded-mode label fallback so the
 # PR is not left without an outcome label.
 #
@@ -338,11 +341,21 @@ fi
 # ---------------------------------------------------------------------------
 POST_REVIEW_MAX_ATTEMPTS=3
 
-# Snapshot the latest review ID before the retry loop for idempotency.
-# If a "failed" attempt actually posted a review, the retry detects it.
-_last_review_id=$(gh api "repos/${REPO_FULL_NAME}/pulls/${PR_NUMBER}/reviews" \
-  --jq 'map(.id) | max // 0' 2>/dev/null) || true
-_last_review_id="${_last_review_id:-0}"
+# Extract the reviewed HEAD SHA for commit-scoped idempotency filtering.
+_reviewed_sha=$(jq -r '.head_sha // empty' "${RESULT_FILE}")
+
+# Snapshot the latest review ID for this commit before the retry loop.
+# Used for idempotency: if a "failed" attempt actually posted a review,
+# the in-loop check detects the new ID and skips further retries.
+# Scoped to commit_id to avoid false positives from unrelated reviews.
+# Empty = no prior reviews for this SHA (or query failed) → guard disabled
+# (fail-closed: we retry rather than assuming success).
+_last_review_id=""
+if [ -n "${_reviewed_sha}" ]; then
+  _last_review_id=$(gh api "repos/${REPO_FULL_NAME}/pulls/${PR_NUMBER}/reviews" \
+    --paginate --jq ".[] | select(.commit_id == \"${_reviewed_sha}\") | .id" \
+    2>/dev/null | sort -rn | head -1) || true
+fi
 
 # Temp file for capturing stderr from fullsend post-review.
 _pr_stderr=$(mktemp)
@@ -373,20 +386,29 @@ for _pr_attempt in $(seq 1 "${POST_REVIEW_MAX_ATTEMPTS}"); do
   _pr_err_detail=""
   if [ -s "${_pr_stderr}" ]; then
     _pr_err_detail=" — $(head -1 "${_pr_stderr}")"
+    # Sanitize for GHA workflow command output (same pattern as _safe_action
+    # below and LA_ACTION/LA_LABEL above).
+    _pr_err_detail="${_pr_err_detail//$'\n'/}"
+    _pr_err_detail="${_pr_err_detail//$'\r'/}"
+    _pr_err_detail="${_pr_err_detail//::/:}"
   fi
 
-  if [ "${_pr_attempt}" -lt "${POST_REVIEW_MAX_ATTEMPTS}" ]; then
-    # Idempotency check: if a new review appeared since the loop started,
-    # the "failed" attempt actually succeeded server-side — skip retry.
+  # Idempotency check: if a new review for this commit appeared since the
+  # loop started, the "failed" attempt actually succeeded server-side.
+  # Runs on every failed attempt (including the last) so a genuinely
+  # successful final attempt is still detected before the fallback fires.
+  if [ -n "${_last_review_id}" ]; then
     _current_review_id=$(gh api "repos/${REPO_FULL_NAME}/pulls/${PR_NUMBER}/reviews" \
-      --jq 'map(.id) | max // 0' 2>/dev/null) || true
-    _current_review_id="${_current_review_id:-0}"
-    if [ "${_current_review_id}" -gt "${_last_review_id}" ]; then
+      --paginate --jq ".[] | select(.commit_id == \"${_reviewed_sha}\") | .id" \
+      2>/dev/null | sort -rn | head -1) || true
+    if [ -n "${_current_review_id}" ] && [ "${_current_review_id}" -gt "${_last_review_id}" ]; then
       echo "::notice::Review was posted despite exit code ${POST_REVIEW_EXIT} — skipping retry (idempotency guard)"
       POST_REVIEW_EXIT=0
       break
     fi
+  fi
 
+  if [ "${_pr_attempt}" -lt "${POST_REVIEW_MAX_ATTEMPTS}" ]; then
     if [[ "${POST_REVIEW_RETRY_DELAY:-}" =~ ^[0-9]+$ ]]; then
       _backoff="${POST_REVIEW_RETRY_DELAY}"
     elif [ "${_pr_attempt}" -eq 1 ]; then
@@ -431,19 +453,24 @@ elif [ "${POST_REVIEW_EXIT}" -ne 0 ]; then
   echo "::error::fullsend post-review failed after ${POST_REVIEW_MAX_ATTEMPTS} attempts (exit ${POST_REVIEW_EXIT}, PR #${PR_NUMBER} in ${REPO_FULL_NAME})" >&2
 
   # Degraded-mode fallback: apply the outcome label directly so the PR is
-  # not left in limbo without a label.
-  #
-  # Assumption: fullsend post-review is a two-step operation (post comment,
-  # then submit formal review). A transient API failure may occur between
-  # the steps, leaving the comment posted but the formal review missing.
-  # We cannot distinguish "comment posted, review failed" from "nothing
-  # posted" because fullsend post-review does not emit distinct exit codes
-  # for each case. (The CLI does print diagnostic details to stderr — these
-  # are captured and included in the retry warning messages above — but exit
-  # codes do not differentiate failure modes.) Applying the label here is a
-  # best-effort measure — exit 1 still signals CI failure so a human can
-  # verify.
-  echo "Attempting degraded-mode label fallback..."
+  # not left in limbo without a label. Only proceeds if the review comment
+  # was actually posted — verified by checking for the fullsend review-agent
+  # HTML marker in the PR's comments. This avoids applying labels based
+  # purely on the sandboxed agent's proposed action when nothing was posted
+  # to the PR (e.g. invalid token, API completely unreachable).
+  _comment_landed=false
+  if gh api "repos/${REPO_FULL_NAME}/issues/${PR_NUMBER}/comments" \
+      --paginate --jq '.[].body' 2>/dev/null \
+    | grep -qF "<!-- fullsend:review-agent -->"; then
+    _comment_landed=true
+  fi
+
+  if [ "${_comment_landed}" != "true" ]; then
+    echo "::warning::Degraded-mode label fallback skipped — could not confirm review comment was posted"
+    exit 1
+  fi
+
+  echo "Attempting degraded-mode label fallback (review comment confirmed posted)..."
   _fallback_applied=false
 
   # Determine the target fallback label so we can skip removing it

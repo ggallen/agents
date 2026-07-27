@@ -376,8 +376,9 @@ cat > "${MOCK_BIN}/gh" <<MOCKEOF
 # Mock gh: handle specific subcommands, log everything else.
 
 # gh api repos/.../pulls/.../reviews (idempotency guard in retry loop)
-if [[ "\$1" == "api" ]] && [[ "\$2" == *"/reviews"* ]] && [[ "\$*" == *"--jq"* ]]; then
-  echo "0"
+# Returns nothing (no reviews for this commit SHA) so the guard stays
+# disabled in non-retry tests. The retry mock overrides this.
+if [[ "\$1" == "api" ]] && [[ "\$2" == *"/reviews"* ]]; then
   exit 0
 fi
 
@@ -739,14 +740,41 @@ RETRY_MOCK_BIN="${TMPDIR}/retry-bin"
 mkdir -p "${RETRY_MOCK_BIN}"
 
 # Build retry-aware gh mock: extends the base mock with a reviews API
-# handler that returns an empty array (no existing reviews), required by
-# the idempotency guard added to the retry loop.
+# handler that returns nothing (no reviews for the reviewed commit SHA)
+# by default. MOCK_REVIEWS_COUNTER + MOCK_REVIEWS_RETURN_FROM can make
+# the handler return a review ID starting from the Nth call, enabling
+# idempotency guard tests. Also includes a comments API handler for the
+# degraded-mode fallback's review-comment marker check.
 cat > "${RETRY_MOCK_BIN}/gh" <<RETRYGHMOCKEOF
 #!/usr/bin/env bash
 
 # gh api repos/.../pulls/.../reviews (idempotency guard)
-if [[ "\$1" == "api" ]] && [[ "\$2" == *"/reviews"* ]] && [[ "\$*" == *"--jq"* ]]; then
-  echo "0"
+# Supports counter-based incrementing for idempotency guard tests:
+#   MOCK_REVIEWS_COUNTER      — path to a file tracking call count
+#   MOCK_REVIEWS_RETURN_FROM  — call number from which to return a review ID
+if [[ "\$1" == "api" ]] && [[ "\$2" == *"/reviews"* ]]; then
+  if [ -n "\${MOCK_REVIEWS_COUNTER:-}" ]; then
+    _rv_count=0
+    if [ -f "\${MOCK_REVIEWS_COUNTER}" ]; then
+      _rv_count=\$(<"\${MOCK_REVIEWS_COUNTER}")
+    fi
+    _rv_count=\$((_rv_count + 1))
+    echo "\${_rv_count}" > "\${MOCK_REVIEWS_COUNTER}"
+    if [ "\${_rv_count}" -ge "\${MOCK_REVIEWS_RETURN_FROM:-999}" ]; then
+      echo "\$((_rv_count * 1000))"
+    fi
+  fi
+  exit 0
+fi
+
+# gh api repos/.../issues/.../comments (review-comment marker check)
+# Returns the fullsend review-agent marker by default so degraded-mode
+# fallback tests can verify label application. Set
+# MOCK_COMMENT_MARKER_PRESENT=false to simulate no comment posted.
+if [[ "\$1" == "api" ]] && [[ "\$2" == *"/comments"* ]] && [[ "\$*" == *"--jq"* ]]; then
+  if [ "\${MOCK_COMMENT_MARKER_PRESENT:-true}" = "true" ]; then
+    echo "<!-- fullsend:review-agent --> review content"
+  fi
   exit 0
 fi
 
@@ -918,6 +946,105 @@ run_retry_test "retry-exhaustion-logging" \
   '{"action":"approve","pr_number":99,"repo":"test-org/test-repo","head_sha":"abc123","body":"LGTM"}' \
   "1,1,1" "1" "3" \
   "all retries exhausted"
+
+# --- Idempotency guard trigger test ---
+# Exercises the actual anti-double-post branch: the mock reviews API
+# returns a new review ID on the 2nd call (simulating a "failed" attempt
+# that actually succeeded server-side). The guard should detect the new
+# review and skip further retries.
+
+_test_name="idempotency-guard-triggers"
+_run_dir="${TMPDIR}/run-${_test_name}"
+mkdir -p "${_run_dir}/iteration-1/output"
+echo '{"action":"approve","pr_number":99,"repo":"test-org/test-repo","head_sha":"abc123","body":"LGTM"}' \
+  > "${_run_dir}/iteration-1/output/agent-result.json"
+: > "${GH_LOG}"
+_counter_file="${TMPDIR}/counter-${_test_name}"
+rm -f "${_counter_file}"
+_reviews_counter="${TMPDIR}/reviews-counter-${_test_name}"
+rm -f "${_reviews_counter}"
+_exit_code=0
+# shellcheck disable=SC2030,SC2031
+(
+  cd "${_run_dir}"
+  export PATH="${RETRY_MOCK_BIN}:${PATH}"
+  export REVIEW_TOKEN="fake-token"
+  export PR_NUMBER="99"
+  export REPO_FULL_NAME="test-org/test-repo"
+  export POST_REVIEW_RETRY_DELAY=0
+  export MOCK_FULLSEND_COUNTER="${_counter_file}"
+  export MOCK_FULLSEND_EXIT_CODES="1"
+  # Reviews mock: 1st call (snapshot) returns "100" (existing review);
+  # 2nd call (in-loop check) returns "12345" (new review appeared).
+  export MOCK_REVIEWS_COUNTER="${_reviews_counter}"
+  export MOCK_REVIEWS_RETURN_FROM=1
+  bash "${POST_SCRIPT}"
+) > "${TMPDIR}/stdout-${_test_name}.log" 2>&1 || _exit_code=$?
+if [ "${_exit_code}" -ne 0 ]; then
+  echo "FAIL: ${_test_name} — expected exit 0, got ${_exit_code}"
+  cat "${TMPDIR}/stdout-${_test_name}.log"
+  FAILURES=$((FAILURES + 1))
+elif ! grep -qF "idempotency guard" "${TMPDIR}/stdout-${_test_name}.log"; then
+  echo "FAIL: ${_test_name} — expected 'idempotency guard' notice in stdout"
+  echo "Actual stdout:"
+  cat "${TMPDIR}/stdout-${_test_name}.log"
+  FAILURES=$((FAILURES + 1))
+else
+  _actual_calls=0
+  if [ -f "${_counter_file}" ]; then
+    _actual_calls=$(<"${_counter_file}")
+  fi
+  if [ "${_actual_calls}" -ne 1 ]; then
+    echo "FAIL: ${_test_name} — expected 1 fullsend call, got ${_actual_calls}"
+    cat "${TMPDIR}/stdout-${_test_name}.log"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo "PASS: ${_test_name}"
+  fi
+fi
+
+# --- Fallback skipped when review comment not posted ---
+# When retries exhaust and the review comment marker is absent from the
+# PR's comments, the degraded-mode label fallback should NOT apply labels.
+
+_test_name="retries-exhausted-fallback-no-comment"
+_run_dir="${TMPDIR}/run-${_test_name}"
+mkdir -p "${_run_dir}/iteration-1/output"
+echo '{"action":"approve","pr_number":99,"repo":"test-org/test-repo","head_sha":"abc123","body":"LGTM"}' \
+  > "${_run_dir}/iteration-1/output/agent-result.json"
+: > "${GH_LOG}"
+_counter_file="${TMPDIR}/counter-${_test_name}"
+rm -f "${_counter_file}"
+_exit_code=0
+# shellcheck disable=SC2030,SC2031
+(
+  cd "${_run_dir}"
+  export PATH="${RETRY_MOCK_BIN}:${PATH}"
+  export REVIEW_TOKEN="fake-token"
+  export PR_NUMBER="99"
+  export REPO_FULL_NAME="test-org/test-repo"
+  export POST_REVIEW_RETRY_DELAY=0
+  export MOCK_FULLSEND_COUNTER="${_counter_file}"
+  export MOCK_FULLSEND_EXIT_CODES="1,1,1"
+  export MOCK_COMMENT_MARKER_PRESENT=false
+  bash "${POST_SCRIPT}"
+) > "${TMPDIR}/stdout-${_test_name}.log" 2>&1 || _exit_code=$?
+if [ "${_exit_code}" -ne 1 ]; then
+  echo "FAIL: ${_test_name} — expected exit 1, got ${_exit_code}"
+  cat "${TMPDIR}/stdout-${_test_name}.log"
+  FAILURES=$((FAILURES + 1))
+elif ! grep -qF "label fallback skipped" "${TMPDIR}/stdout-${_test_name}.log"; then
+  echo "FAIL: ${_test_name} — expected 'label fallback skipped' in stdout"
+  echo "Actual stdout:"
+  cat "${TMPDIR}/stdout-${_test_name}.log"
+  FAILURES=$((FAILURES + 1))
+elif grep -qF "add-label" "${GH_LOG}"; then
+  echo "FAIL: ${_test_name} — expected no label to be applied, but found add-label in gh log"
+  cat "${GH_LOG}"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: ${_test_name}"
+fi
 
 # --- Default backoff and invalid POST_REVIEW_RETRY_DELAY tests ---
 # These tests do NOT use run_retry_test because it hardcodes
