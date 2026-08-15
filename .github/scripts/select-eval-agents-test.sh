@@ -96,7 +96,6 @@ YAML
   cat > "$tmpdir/harness/code.yaml" << 'YAML'
 agent: agents/code.md
 doc: docs/code.md
-policy: policies/code.yaml
 pre_script: scripts/pre-code.sh
 post_script: scripts/post-code.sh
 host_files:

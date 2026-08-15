@@ -34,9 +34,9 @@ common/      Shared configuration (GCP Vertex AI auth)
 
 Agents run inside sandboxed containers with strict filesystem, network, and binary restrictions. Each agent follows a three-phase pipeline:
 
-1. **Pre-script** — runs on the GitHub Actions runner to validate inputs and prepare the environment
+1. **Pre-script** — runs on the CI runner to validate inputs and prepare the environment
 2. **Sandbox** — runs the agent with restricted permissions; the agent writes code and produces structured JSON output
-3. **Post-script** — runs on the runner with elevated permissions to perform GitHub mutations (pushing branches, creating PRs, posting comments, applying labels)
+3. **Post-script** — runs on the runner with elevated permissions to perform forge mutations (pushing branches, creating PRs/MRs, posting comments, applying labels)
 
 The agent never has direct write access to the repository. All mutations flow through post-scripts.
 

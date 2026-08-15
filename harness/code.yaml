@@ -4,17 +4,16 @@
 # Flow: pre_script → sandbox (agent) → post_script
 #   pre_script  : validates inputs on the runner BEFORE sandbox creation
 #   agent       : reads the issue, implements, tests, scans, commits locally
-#   post_script : secret scan, pre-commit, push branch, create PR, assign human
+#   post_script : secret scan, pre-commit, push branch, create PR/MR, assign human
 #
-# The agent NEVER pushes or creates PRs. Enforcement: the sandbox
-# GH_TOKEN is read-only scoped, PUSH_TOKEN never enters the sandbox,
-# and network policy restricts git/gh binary access.
+# The agent NEVER pushes or creates PRs/MRs. Enforcement: the sandbox
+# GH_TOKEN/GITLAB_TOKEN is read-only scoped, PUSH_TOKEN never enters the
+# sandbox, and network policy restricts binary access per forge.
 # Only the post-script, running on the runner with PUSH_TOKEN, can write.
 agent: agents/code.md
 doc: docs/code.md
 model: opus
 image: ghcr.io/fullsend-ai/fullsend-code@sha256:de3ecbd7719a1927c983142ada96475f3314d2505d0f258bcf19c31411856eb6
-policy: policies/code.yaml
 
 role: coder
 slug: fullsend-ai-coder
@@ -56,11 +55,50 @@ timeout_minutes: 35
 
 forge:
   github:
+    policy: policies/github/code.yaml
     pre_script: scripts/pre-code.sh
     post_script: scripts/post-code.sh
+    skills:
+      - skills/github-forge
+    host_files:
+      - src: env/github/code.env
+        dest: /sandbox/workspace/.env.d/forge-code.env
+        expand: true
     env:
       runner:
         PUSH_TOKEN: "${PUSH_TOKEN}"
         PUSH_TOKEN_SOURCE: "${PUSH_TOKEN_SOURCE}"
         REPO_FULL_NAME: "${REPO_FULL_NAME}"
         ISSUE_NUMBER: "${ISSUE_NUMBER}"
+        ISSUE_URL: "${GITHUB_ISSUE_URL}"
+        GH_TOKEN: "${GH_TOKEN}"
+        FULLSEND_FORGE: github
+      sandbox:
+        ISSUE_URL: "${GITHUB_ISSUE_URL}"
+        GH_TOKEN: "${GH_TOKEN}"
+        FULLSEND_FORGE: github
+  gitlab:
+    policy: policies/gitlab/code.yaml
+    pre_script: scripts/pre-code.sh
+    post_script: scripts/post-code.sh
+    skills:
+      - skills/gitlab-forge
+    host_files:
+      - src: env/gitlab/code.env
+        dest: /sandbox/workspace/.env.d/forge-code.env
+        expand: true
+    env:
+      runner:
+        PUSH_TOKEN: "${PUSH_TOKEN}"
+        PUSH_TOKEN_SOURCE: "${PUSH_TOKEN_SOURCE}"
+        REPO_FULL_NAME: "${REPO_FULL_NAME}"
+        ISSUE_NUMBER: "${ISSUE_NUMBER}"
+        ISSUE_URL: "${GITLAB_ISSUE_URL}"
+        GITLAB_TOKEN: "${GITLAB_TOKEN}"
+        GITLAB_HOST: "${GITLAB_HOST}"
+        FULLSEND_FORGE: gitlab
+      sandbox:
+        ISSUE_URL: "${GITLAB_ISSUE_URL}"
+        GITLAB_TOKEN: "${GITLAB_TOKEN}"
+        GITLAB_HOST: "${GITLAB_HOST}"
+        FULLSEND_FORGE: gitlab
