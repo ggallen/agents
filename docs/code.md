@@ -185,10 +185,10 @@ setup:
   composition should override at the forge level if needed.
 - **GitLab uses `curl`** instead of `gh` for API access. The GitLab
   sandbox policy allows `curl` for `gitlab_api` endpoints only.
-- **GitLab host allowlist** — `forge_validate_issue_url` in
-  `scripts/lib/gitlab-code-ops.lib.sh` and the network policy in
-  `policies/gitlab/code.yaml` both maintain an allowlist of GitLab
-  hosts. To support a self-hosted GitLab instance, update both files.
+- **GitLab host validation** — `forge_validate_issue_url` validates
+  the host against operator-controlled trust sources (`CI_SERVER_HOST`
+  or `FULLSEND_GITLAB_URL`). To support a self-hosted instance, set the
+  appropriate env var and update `policies/gitlab/code.yaml`.
 
 ## Custom network policy
 

@@ -172,13 +172,13 @@ forge-specific skills provide the appropriate CLI recipes.
 | `PR_URL` | Full HTTPS URL of the merge request. Used to derive `GITLAB_HOST` and validate `REPO_FULL_NAME`. |
 | `GITLAB_TOKEN` | Personal or project access token with `api` scope. |
 
-### GitLab host allowlist
+### GitLab host validation
 
-`gitlab-fix-ops.lib.sh` validates `GITLAB_HOST` against an allowlist
-(`gitlab.com`, `gitlab.cee.redhat.com`). To support a self-hosted instance,
-add the host to `forge_validate_pr_url` in `gitlab-fix-ops.lib.sh`,
-`ALLOWED_GITLAB_HOSTS` in `process-fix-result.py`, and
-`policies/gitlab/fix.yaml`.
+`gitlab-fix-ops.lib.sh` validates `GITLAB_HOST` against operator-controlled
+trust sources. Set `CI_SERVER_HOST` (automatic in GitLab CI) or
+`FULLSEND_GITLAB_URL` to allow a self-hosted instance. Validation fails
+closed when neither is set. The network policy in `policies/gitlab/fix.yaml`
+must also be updated to allow connections to the host.
 
 ## Custom network policy
 

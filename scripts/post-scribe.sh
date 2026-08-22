@@ -180,10 +180,41 @@ _gitlab_api() {
   shift
   local endpoint="$1"
   shift
-  case "${GITLAB_HOST}" in
-    gitlab.com|gitlab.cee.redhat.com) ;;
-    *) echo "ERROR: GITLAB_HOST '$(_gha_sanitize "${GITLAB_HOST}")' is not in the allowed host list" >&2; return 1 ;;
-  esac
+  local _allowed_hosts=""
+  if [[ -n "${CI_SERVER_HOST:-}" ]]; then
+    if [[ ! "${CI_SERVER_HOST}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      echo "ERROR: CI_SERVER_HOST contains invalid characters" >&2
+      return 1
+    fi
+    _allowed_hosts="${CI_SERVER_HOST}"
+  fi
+  if [[ -n "${FULLSEND_GITLAB_URL:-}" ]]; then
+    if [[ ! "${FULLSEND_GITLAB_URL}" =~ ^https?:// ]]; then
+      echo "ERROR: FULLSEND_GITLAB_URL must start with https:// or http://" >&2
+      return 1
+    fi
+    local _gl_host
+    _gl_host=$(echo "${FULLSEND_GITLAB_URL%%#*}" | sed -E 's|^https?://([^/@]*@)?([^/:]+).*|\2|')
+    if [[ -n "${_gl_host}" ]]; then
+      if [[ ! "${_gl_host}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "ERROR: FULLSEND_GITLAB_URL hostname contains invalid characters" >&2
+        return 1
+      fi
+      _allowed_hosts="${_allowed_hosts:+${_allowed_hosts} }${_gl_host}"
+    fi
+  fi
+  if [[ -z "${_allowed_hosts}" ]]; then
+    echo "ERROR: No trusted GitLab host configured (set CI_SERVER_HOST or FULLSEND_GITLAB_URL)" >&2
+    return 1
+  fi
+  local _host_ok=0
+  for _ah in ${_allowed_hosts}; do
+    [[ "${GITLAB_HOST}" == "${_ah}" ]] && _host_ok=1
+  done
+  if [[ "${_host_ok}" -eq 0 ]]; then
+    echo "ERROR: GITLAB_HOST '$(_gha_sanitize "${GITLAB_HOST}")' is not in the allowed host list" >&2
+    return 1
+  fi
   curl --fail --silent --show-error \
     --connect-timeout 10 --max-time 30 \
     --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \

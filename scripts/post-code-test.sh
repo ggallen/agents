@@ -2011,11 +2011,43 @@ validate_gitlab_issue_url() {
     return 0
   fi
   local host
-  host=$(echo "${url}" | sed -E 's|^https://([^/]+)/.*|\1|')
-  case "${host}" in
-    gitlab.com|gitlab.cee.redhat.com) echo "valid" ;;
-    *) echo "invalid:host:${host}" ;;
-  esac
+  host=$(echo "${url}" | sed -E 's|^https://([^/:]+)/.*|\1|')
+  local _allowed_hosts=""
+  if [[ -n "${CI_SERVER_HOST:-}" ]]; then
+    if [[ ! "${CI_SERVER_HOST}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      echo "invalid:ci-server-host-chars"
+      return 0
+    fi
+    _allowed_hosts="${CI_SERVER_HOST}"
+  fi
+  if [[ -n "${FULLSEND_GITLAB_URL:-}" ]]; then
+    if [[ ! "${FULLSEND_GITLAB_URL}" =~ ^https?:// ]]; then
+      echo "invalid:fullsend-url-scheme"
+      return 0
+    fi
+    local _gl_host
+    _gl_host=$(echo "${FULLSEND_GITLAB_URL%%#*}" | sed -E 's|^https?://([^/@]*@)?([^/:]+).*|\2|')
+    if [[ -n "${_gl_host}" ]]; then
+      if [[ ! "${_gl_host}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "invalid:fullsend-url-chars"
+        return 0
+      fi
+      _allowed_hosts="${_allowed_hosts:+${_allowed_hosts} }${_gl_host}"
+    fi
+  fi
+  if [[ -z "${_allowed_hosts}" ]]; then
+    echo "invalid:no-trust-source"
+    return 0
+  fi
+  local _host_ok=0
+  for _ah in ${_allowed_hosts}; do
+    [[ "${host}" == "${_ah}" ]] && _host_ok=1
+  done
+  if [[ "${_host_ok}" -eq 0 ]]; then
+    echo "invalid:host:${host}"
+  else
+    echo "valid"
+  fi
 }
 
 run_gitlab_url_test() {
@@ -2040,12 +2072,15 @@ run_gitlab_url_test() {
 
 # --- GitLab URL validation test cases ---
 
+CI_SERVER_HOST="gitlab.com" \
 run_gitlab_url_test "gitlab-url-valid-gitlab-com" \
   "https://gitlab.com/group/project/-/issues/42" "valid"
 
+CI_SERVER_HOST="gitlab.cee.redhat.com" \
 run_gitlab_url_test "gitlab-url-valid-redhat" \
   "https://gitlab.cee.redhat.com/gallen/integration-service/-/issues/1" "valid"
 
+CI_SERVER_HOST="gitlab.com" \
 run_gitlab_url_test "gitlab-url-valid-nested-group" \
   "https://gitlab.com/org/sub-group/project/-/issues/99" "valid"
 
@@ -2055,6 +2090,7 @@ run_gitlab_url_test "gitlab-url-invalid-no-dash-segment" \
 run_gitlab_url_test "gitlab-url-invalid-github-url" \
   "https://github.com/owner/repo/issues/42" "invalid:pattern"
 
+CI_SERVER_HOST="gitlab.com" \
 run_gitlab_url_test "gitlab-url-invalid-unknown-host" \
   "https://git.example.com/group/project/-/issues/42" "invalid:host"
 
@@ -2067,6 +2103,22 @@ run_gitlab_url_test "gitlab-url-invalid-non-numeric-issue" \
 run_gitlab_url_test "gitlab-url-invalid-mr-not-issue" \
   "https://gitlab.com/group/project/-/merge_requests/42" "invalid:pattern"
 
+CI_SERVER_HOST="" FULLSEND_GITLAB_URL="" \
+run_gitlab_url_test "gitlab-url-no-trust-source" \
+  "https://gitlab.com/group/project/-/issues/42" "invalid:no-trust-source"
+
+CI_SERVER_HOST="" FULLSEND_GITLAB_URL="https://gitlab.example.com" \
+run_gitlab_url_test "gitlab-url-valid-via-fullsend-url-only" \
+  "https://gitlab.example.com/group/project/-/issues/42" "valid"
+
+CI_SERVER_HOST="" FULLSEND_GITLAB_URL="gitlab.example.com" \
+run_gitlab_url_test "gitlab-url-fullsend-url-bare-hostname" \
+  "https://gitlab.example.com/group/project/-/issues/42" "invalid:fullsend-url-scheme"
+
+CI_SERVER_HOST="gitlab.com" FULLSEND_GITLAB_URL="https://gitlab.internal.com" \
+run_gitlab_url_test "gitlab-url-both-trust-sources" \
+  "https://gitlab.internal.com/group/project/-/issues/42" "valid"
+
 # ---------------------------------------------------------------------------
 # Test helper — reimplements the GitLab issue URL parsing from
 # gitlab-code-ops.lib.sh forge_parse_issue_url.
@@ -2074,7 +2126,7 @@ run_gitlab_url_test "gitlab-url-invalid-mr-not-issue" \
 parse_gitlab_issue_url() {
   local url="$1"
   local host repo_full issue_number repo_encoded
-  host=$(echo "${url}" | sed -E 's|^https://([^/]+)/.*|\1|')
+  host=$(echo "${url}" | sed -E 's|^https://([^/:]+)/.*|\1|')
   repo_full=$(echo "${url}" | sed -E 's|^https://[^/]+/(.+)/-/issues/[0-9]+$|\1|')
   issue_number=$(basename "${url}")
   repo_encoded=$(printf '%s' "${repo_full}" | jq -sRr @uri)
@@ -2422,6 +2474,7 @@ _gl_ns_rc=0
   export FULLSEND_FORGE="gitlab"
   export GITLAB_TOKEN="${PUSH_TOKEN}"
   export GITLAB_HOST="gitlab.com"
+  export CI_SERVER_HOST="gitlab.com"
   bash "${POST_SCRIPT}"
 ) > "${GL_INT_TMPDIR}/stdout-gl-namespace.log" 2>&1 || _gl_ns_rc=$?
 

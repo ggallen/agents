@@ -77,10 +77,11 @@ setup:
   `policies/gitlab/retro.yaml` (GitLab).
 - **GitLab uses `curl`** instead of `gh` for API access. The GitLab
   sandbox policy allows `curl` for `gitlab_api` endpoints only.
-- **GitLab host allowlist** — `forge_validate_originating_url` in
-  `scripts/lib/gitlab-retro-ops.lib.sh` and the network policy in
-  `policies/gitlab/retro.yaml` both maintain an allowlist of GitLab
-  hosts. Keep them in sync when adding new hosts.
+- **GitLab host validation** — `forge_validate_originating_url`
+  validates the host against operator-controlled trust sources
+  (`CI_SERVER_HOST` or `FULLSEND_GITLAB_URL`). To support a self-hosted
+  instance, set the appropriate env var and update
+  `policies/gitlab/retro.yaml`.
 
 ## How the agent works
 

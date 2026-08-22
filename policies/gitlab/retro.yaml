@@ -39,7 +39,8 @@ network_policies:
       - path: "**/claude"
       - path: "**/node"
 
-  # Keep host list in sync with scripts/lib/gitlab-retro-ops.lib.sh forge_validate_originating_url.
+  # To support a self-hosted instance, add it here and set CI_SERVER_HOST
+  # or FULLSEND_GITLAB_URL so shell validation accepts the host.
   gitlab_api:
     name: gitlab-api
     endpoints:

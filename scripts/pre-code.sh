@@ -429,18 +429,49 @@ forge_validate_issue_url() {
     return 1
   fi
   local host
-  host=$(echo "${url}" | sed -E 's|^https://([^/]+)/.*|\1|')
-  # Allowed GitLab hosts. To support a self-hosted instance, add it here
-  # AND in the network policy (policies/gitlab/code.yaml).
-  case "${host}" in
-    gitlab.com|gitlab.cee.redhat.com) ;;
-    *) echo "ERROR: GitLab host '${host}' is not in the allowed host list (see gitlab-code-ops.lib.sh and policies/gitlab/code.yaml)" >&2; return 1 ;;
-  esac
+  host=$(echo "${url}" | sed -E 's|^https://([^/:]+)/.*|\1|')
+  # Validate host against operator-controlled trust sources.
+  # Fails closed when neither CI_SERVER_HOST nor FULLSEND_GITLAB_URL is set.
+  local _allowed_hosts=""
+  if [[ -n "${CI_SERVER_HOST:-}" ]]; then
+    if [[ ! "${CI_SERVER_HOST}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      echo "ERROR: CI_SERVER_HOST contains invalid characters" >&2
+      return 1
+    fi
+    _allowed_hosts="${CI_SERVER_HOST}"
+  fi
+  if [[ -n "${FULLSEND_GITLAB_URL:-}" ]]; then
+    if [[ ! "${FULLSEND_GITLAB_URL}" =~ ^https?:// ]]; then
+      echo "ERROR: FULLSEND_GITLAB_URL must start with https:// or http://" >&2
+      return 1
+    fi
+    local _gl_host
+    _gl_host=$(echo "${FULLSEND_GITLAB_URL%%#*}" | sed -E 's|^https?://([^/@]*@)?([^/:]+).*|\2|')
+    if [[ -n "${_gl_host}" ]]; then
+      if [[ ! "${_gl_host}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "ERROR: FULLSEND_GITLAB_URL hostname contains invalid characters" >&2
+        return 1
+      fi
+      _allowed_hosts="${_allowed_hosts:+${_allowed_hosts} }${_gl_host}"
+    fi
+  fi
+  if [[ -z "${_allowed_hosts}" ]]; then
+    echo "ERROR: No trusted GitLab host configured (set CI_SERVER_HOST or FULLSEND_GITLAB_URL)" >&2
+    return 1
+  fi
+  local _host_ok=0
+  for _ah in ${_allowed_hosts}; do
+    [[ "${host}" == "${_ah}" ]] && _host_ok=1
+  done
+  if [[ "${_host_ok}" -eq 0 ]]; then
+    echo "ERROR: GitLab host '${host}' is not in the allowed host list" >&2
+    return 1
+  fi
 }
 
 forge_parse_issue_url() {
   local url="${1:-${ISSUE_URL:-}}"
-  GITLAB_HOST=$(echo "${url}" | sed -E 's|^https://([^/]+)/.*|\1|')
+  GITLAB_HOST=$(echo "${url}" | sed -E 's|^https://([^/:]+)/.*|\1|')
   REPO_FULL_NAME=$(echo "${url}" | sed -E 's|^https://[^/]+/(.+)/-/issues/[0-9]+$|\1|')
   REPO_ENCODED=$(printf '%s' "${REPO_FULL_NAME}" | jq -sRr @uri)
   ISSUE_NUMBER=$(basename "${url}")
@@ -898,7 +929,7 @@ if [ "${FULLSEND_FORGE}" = "gitlab" ]; then
   # shellcheck disable=SC2034
   REPO_ENCODED="$(printf '%s' "${REPO_FULL_NAME}" | jq -sRr @uri)"
   if [[ -n "${ISSUE_URL:-}" ]]; then
-    _url_host="$(echo "${ISSUE_URL}" | sed -E 's|^https://([^/]+)/.*|\1|')"
+    _url_host="$(echo "${ISSUE_URL}" | sed -E 's|^https://([^/:]+)/.*|\1|')"
     if [[ -n "${GITLAB_HOST:-}" && "${GITLAB_HOST}" != "${_url_host}" ]]; then
       echo "::error::GITLAB_HOST '${GITLAB_HOST}' does not match issue URL host '${_url_host}'"
       exit 1

@@ -234,17 +234,50 @@ forge_validate_pr_url() {
     return 1
   fi
   local host
-  host=$(echo "${PR_URL}" | sed -E 's|^https://([^/]+)/.*|\1|')
-  case "${host}" in
-    gitlab.com|gitlab.cee.redhat.com) ;;
-    *) echo "ERROR: GitLab host '${host}' is not in the allowed host list" >&2; return 1 ;;
-  esac
+  host=$(echo "${PR_URL}" | sed -E 's|^https://([^/:]+)/.*|\1|')
+  # Validate host against operator-controlled trust sources.
+  # Fails closed when neither CI_SERVER_HOST nor FULLSEND_GITLAB_URL is set.
+  local _allowed_hosts=""
+  if [[ -n "${CI_SERVER_HOST:-}" ]]; then
+    if [[ ! "${CI_SERVER_HOST}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      echo "ERROR: CI_SERVER_HOST contains invalid characters" >&2
+      return 1
+    fi
+    _allowed_hosts="${CI_SERVER_HOST}"
+  fi
+  if [[ -n "${FULLSEND_GITLAB_URL:-}" ]]; then
+    if [[ ! "${FULLSEND_GITLAB_URL}" =~ ^https?:// ]]; then
+      echo "ERROR: FULLSEND_GITLAB_URL must start with https:// or http://" >&2
+      return 1
+    fi
+    local _gl_host
+    _gl_host=$(echo "${FULLSEND_GITLAB_URL%%#*}" | sed -E 's|^https?://([^/@]*@)?([^/:]+).*|\2|')
+    if [[ -n "${_gl_host}" ]]; then
+      if [[ ! "${_gl_host}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "ERROR: FULLSEND_GITLAB_URL hostname contains invalid characters" >&2
+        return 1
+      fi
+      _allowed_hosts="${_allowed_hosts:+${_allowed_hosts} }${_gl_host}"
+    fi
+  fi
+  if [[ -z "${_allowed_hosts}" ]]; then
+    echo "ERROR: No trusted GitLab host configured (set CI_SERVER_HOST or FULLSEND_GITLAB_URL)" >&2
+    return 1
+  fi
+  local _host_ok=0
+  for _ah in ${_allowed_hosts}; do
+    [[ "${host}" == "${_ah}" ]] && _host_ok=1
+  done
+  if [[ "${_host_ok}" -eq 0 ]]; then
+    echo "ERROR: GitLab host '$(_gha_sanitize "${host}")' is not in the allowed host list" >&2
+    return 1
+  fi
 }
 
 forge_parse_pr_url() {
   # Extract host, project path, and MR IID from URL.
   # e.g., https://gitlab.com/group/subgroup/project/-/merge_requests/42
-  GITLAB_HOST=$(echo "${PR_URL}" | sed -E 's|^https://([^/]+)/.*|\1|')
+  GITLAB_HOST=$(echo "${PR_URL}" | sed -E 's|^https://([^/:]+)/.*|\1|')
   REPO=$(echo "${PR_URL}" | sed -E 's|^https://[^/]+/(.+)/-/merge_requests/[0-9]+$|\1|')
   REPO_ENCODED=$(printf '%s' "${REPO}" | jq -sRr @uri)
   PR_NUMBER=$(basename "${PR_URL}")

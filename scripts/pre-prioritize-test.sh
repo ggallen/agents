@@ -43,10 +43,24 @@ run_test() {
   local issue_url="$3"
   local expected_pattern="${4:-}"
   local expect_failure="${5:-false}"
+  local extra_env="${6:-}"
+
+  local env_cmd=(
+    env -u CI_SERVER_HOST -u FULLSEND_GITLAB_URL
+    FULLSEND_FORGE="${forge}"
+    ISSUE_URL="${issue_url}"
+    GH_TOKEN="fake-token"
+    GITLAB_TOKEN="fake-gitlab-token"
+  )
+
+  if [[ -n "${extra_env}" ]]; then
+    while IFS= read -r kv; do
+      [[ -n "${kv}" ]] && env_cmd+=("${kv}")
+    done <<< "${extra_env}"
+  fi
 
   local exit_code=0
-  FULLSEND_FORGE="${forge}" ISSUE_URL="${issue_url}" GH_TOKEN="fake-token" GITLAB_TOKEN="fake-gitlab-token" \
-    bash "${PRE_SCRIPT}" > "${TMPDIR}/stdout-${test_name}.log" 2>&1 || exit_code=$?
+  "${env_cmd[@]}" bash "${PRE_SCRIPT}" > "${TMPDIR}/stdout-${test_name}.log" 2>&1 || exit_code=$?
 
   if [[ "${expect_failure}" == "true" ]]; then
     if [[ ${exit_code} -eq 0 ]]; then
@@ -99,29 +113,78 @@ run_test "github-malformed-url-fails" \
 run_test "gitlab-valid-url" \
   "gitlab" \
   "https://gitlab.com/test-group/test-project/-/issues/42" \
-  "Issue URL validated."
+  "Issue URL validated." \
+  "false" \
+  "CI_SERVER_HOST=gitlab.com"
 
 run_test "gitlab-subgroup-url" \
   "gitlab" \
   "https://gitlab.com/top/sub/deep/project/-/issues/99" \
-  "Issue URL validated."
+  "Issue URL validated." \
+  "false" \
+  "CI_SERVER_HOST=gitlab.com"
 
 run_test "gitlab-malformed-url-fails" \
   "gitlab" \
   "https://gitlab.com/not-an-issue-url" \
   "does not match expected GitLab pattern" \
-  "true"
+  "true" \
+  "CI_SERVER_HOST=gitlab.com"
 
 run_test "gitlab-non-allowlisted-host-fails" \
   "gitlab" \
   "https://evil.example/group/project/-/issues/1" \
   "is not in the allowed host list" \
-  "true"
+  "true" \
+  "CI_SERVER_HOST=gitlab.com"
 
 run_test "gitlab-internal-host-valid" \
   "gitlab" \
   "https://gitlab.cee.redhat.com/team/project/-/issues/5" \
-  "Issue URL validated."
+  "Issue URL validated." \
+  "false" \
+  "CI_SERVER_HOST=gitlab.cee.redhat.com"
+
+# --- GitLab dynamic host validation tests ---
+
+# CI_SERVER_HOST trust source: accepts matching self-hosted instance.
+run_test "gitlab-ci-server-host-accepts" \
+  "gitlab" \
+  "https://gitlab.example.com/group/project/-/issues/1" \
+  "Issue URL validated." \
+  "false" \
+  "CI_SERVER_HOST=gitlab.example.com"
+
+# FULLSEND_GITLAB_URL trust source: accepts matching host.
+run_test "gitlab-fullsend-url-accepts" \
+  "gitlab" \
+  "https://gitlab.example.com/group/project/-/issues/1" \
+  "Issue URL validated." \
+  "false" \
+  "FULLSEND_GITLAB_URL=https://gitlab.example.com"
+
+# FULLSEND_GITLAB_URL with trailing path: host extraction still works.
+run_test "gitlab-fullsend-url-with-path-accepts" \
+  "gitlab" \
+  "https://gitlab.example.com/group/project/-/issues/1" \
+  "Issue URL validated." \
+  "false" \
+  "FULLSEND_GITLAB_URL=https://gitlab.example.com/api/v4"
+
+# Rejects host not matching any trust source.
+run_test "gitlab-untrusted-host-rejected" \
+  "gitlab" \
+  "https://evil.com/group/project/-/issues/1" \
+  "is not in the allowed host list" \
+  "true" \
+  "CI_SERVER_HOST=gitlab.example.com"
+
+# Fails closed when no trust source is set.
+run_test "gitlab-no-trust-source-fails-closed" \
+  "gitlab" \
+  "https://gitlab.com/group/project/-/issues/1" \
+  "No trusted GitLab host configured" \
+  "true"
 
 # --- Invalid forge ---
 
